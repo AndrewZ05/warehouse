@@ -1,0 +1,15 @@
+{
+  "warehouse": "bigquery",
+  "defaultSchema": "df_warehouse",
+  "assertionSchema": "df_warehouse_assertions",
+  "defaultDatabase": "bi-dev-391216",
+  "defaultLocation": "US",
+  "vars": {
+    "dataset_ga4": "analytics_402394233",
+    "ga4_days_back": "4",
+    "ga4_start_date": "2020-01-01",    
+    "prior_days": "200",
+    "timezone": "America/Chicago",
+    "unwanted_referrals": "00000000.com,test.com"
+  }
+}

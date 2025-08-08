@@ -1,0 +1,82 @@
+--| TABLE: GA4 Staging Events Table
+--| DESCRIPTION: Flattens the event data into a single table
+
+config {
+  type: "table",
+  schema: 'df_warehouse_staging',
+  tags: ["daily"],
+  bigquery: {
+    partitionBy: "occurrence_date"
+  }
+}
+-- pre_operations {
+
+--   DECLARE event_date_checkpoint DEFAULT (
+--     SELECT date("2020-01-01")
+--   );
+
+--   SET event_date_checkpoint = (
+--     ${when(incremental(),
+--       `SELECT
+--         LEAST(
+--           (SELECT date_sub(current_date(), INTERVAL ${dataform.projectConfig.vars.ga4_days_back} DAY)),
+--           (SELECT max(event_date) from ${self()})
+--         )`,
+--       `SELECT date("${dataform.projectConfig.vars.ga4_start_date}")`
+--     )}
+--   );
+
+--   ${when(incremental(),
+--     `DELETE ${self()} WHERE event_date > event_date_checkpoint`
+--   )}  
+-- }
+
+WITH unnested_users AS (
+  SELECT
+    pseudo_user_id,
+    stream_id,
+    user_info.last_active_timestamp_micros AS user_info_last_active_timestamp_micros,
+    user_info.user_first_touch_timestamp_micros AS user_info_user_first_touch_timestamp_micros,
+    user_info.first_purchase_date AS user_info_first_purchase_date,
+    device.operating_system AS device_operating_system,
+    device.category AS device_category,
+    device.mobile_brand_name AS device_mobile_brand_name,
+    device.mobile_model_name AS device_mobile_model_name,
+    device.unified_screen_name AS device_unified_screen_name,
+    geo.city AS geo_city,
+    geo.country AS geo_country,
+    geo.continent AS geo_continent,
+    geo.region AS geo_region,
+    privacy_info.is_limited_ad_tracking AS privacy_info_is_limited_ad_tracking,
+    privacy_info.is_ads_personalization_allowed AS privacy_info_is_ads_personalization_allowed,
+    PARSE_DATE('%Y%m%d', occurrence_date) as occurrence_date,
+    PARSE_DATE('%Y%m%d', last_updated_date) as last_updated_date,
+    audiences,
+    user_ltv.revenue_in_usd AS user_ltv_revenue_in_usd,
+    user_ltv.sessions AS user_ltv_sessions,
+    user_ltv.engagement_time_millis AS user_ltv_engagement_time_millis,
+    user_ltv.purchases AS user_ltv_purchases,
+    user_ltv.engaged_sessions AS user_ltv_engaged_sessions,
+    user_ltv.session_duration_micros AS user_ltv_session_duration_micros,
+    predictions.in_app_purchase_score_7d AS predictions_in_app_purchase_score_7d,
+    predictions.purchase_score_7d AS predictions_purchase_score_7d,
+    predictions.churn_score_7d AS predictions_churn_score_7d,
+    predictions.revenue_28d_in_usd AS predictions_revenue_28d_in_usd,
+
+    -- Custom user properties
+    ${project_variables.custom_user_params && project_variables.custom_user_params.length > 0 ? project_variables.custom_user_params
+        .map(
+          (item) =>
+            get_ga4_var.eventParam(item.param, item.type, item.column_name, "user_properties")
+        )
+        .join(", ") : ""}
+    
+
+    FROM ${ref("pseudonymous_users_*")}
+
+    -- WHERE _TABLE_SUFFIX > FORMAT_DATE('%Y%m%d', event_date_checkpoint)
+)
+
+--Ensure ga_session_id is not null
+SELECT *
+FROM unnested_users

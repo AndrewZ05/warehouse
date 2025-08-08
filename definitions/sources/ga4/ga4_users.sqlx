@@ -1,0 +1,6 @@
+config {
+    type: "declaration",
+    schema: dataform.projectConfig.vars.dataset_ga4,
+    name: "users_*",
+    description: "The user attributes for authenticated users collected in GA4."
+}

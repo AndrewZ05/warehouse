@@ -1,0 +1,26 @@
+config {
+    type: "table",
+    schema: 'df_warehouse_intermediate',
+    tags: ["daily"]
+}
+
+WITH
+  ranked_user_data AS (
+    SELECT
+      pseudo_user_id,
+      audiences,
+      ROW_NUMBER() OVER (
+        PARTITION BY
+          pseudo_user_id
+        ORDER BY
+          occurrence_date DESC
+      ) AS row_num
+    FROM
+      ${ref("stg_ga4_pseudo_users")}
+  )
+SELECT
+  * EXCEPT (row_num)
+FROM
+  ranked_user_data
+WHERE
+  row_num = 1

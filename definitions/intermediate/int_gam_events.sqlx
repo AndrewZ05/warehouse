@@ -1,0 +1,97 @@
+config {
+  type: "incremental",
+  schema: 'df_warehouse_intermediate',
+  bigquery: {
+    partitionBy: "event_date",
+    clusterBy: ["event_timestamp"]
+  }
+}
+
+pre_operations {
+
+  DECLARE event_date_checkpoint DEFAULT (
+    SELECT date("2020-01-01")
+  );
+
+  SET event_date_checkpoint = (
+    ${when(incremental(),
+      `SELECT
+        LEAST(
+          (SELECT date_sub(current_date(), INTERVAL ${dataform.projectConfig.vars.ga4_days_back} DAY)),
+          (SELECT max(event_date) from ${self()})
+        )`,
+      `SELECT date("${dataform.projectConfig.vars.ga4_start_date}")`
+    )}
+  );
+
+  ${when(incremental(),
+    `DELETE ${self()} WHERE event_date > event_date_checkpoint`
+  )}  
+}
+
+WITH
+  gam_clicks AS (
+    SELECT
+      event_name,
+      event_timestamp,
+      keys.value AS pvid
+    FROM
+      ${ref("gam_click_events")} clicks
+      LEFT JOIN ${ref("gam_click_keys")} keys ON clicks.line_item_id = keys.line_item_id
+      AND clicks.creative_id = keys.creative_id
+      AND keys.key = 'pvid'
+      WHERE clicks.event_date > event_date_checkpoint
+), gam_impressions as (
+    SELECT
+      event_name,
+      event_timestamp,
+      keys.value AS pvid
+    FROM
+      ${ref("gam_impression_events")} impressions
+      LEFT JOIN ${ref("gam_impression_keys")} keys ON impressions.line_item_id = keys.line_item_id
+      AND impressions.creative_id = keys.creative_id
+      AND keys.key = 'pvid'
+    WHERE impressions.event_date > event_date_checkpoint
+  ),
+  gam_all_events as (
+    select * from gam_clicks
+    union all
+    select * from gam_impressions
+  ),
+  page_view_events AS (
+    SELECT
+      *,
+      cast(pvid AS STRING) AS page_pvid
+    FROM
+      ${ref("stg_ga4_events")}
+    WHERE
+      event_name = 'page_view'
+      AND event_date > event_date_checkpoint
+  ),
+  final AS (
+    SELECT
+      page_view_events.* EXCEPT (page_pvid)
+      REPLACE(
+        gam_all_events.event_name as event_name,
+        gam_all_events.event_timestamp as event_timestamp
+      )
+      -- TO_HEX(
+      --   MD5(
+      --     CONCAT(
+      --       page_view_events.user_pseudo_id,
+      --       page_view_events.ga_session_id,
+      --       gam_all_events.event_name,
+      --       gam_all_events.event_timestamp,
+      --       page_view_events.event_bundle_sequence_id
+      --     )
+      --   )
+      -- ) AS event_id      
+    FROM
+      gam_all_events
+      LEFT JOIN page_view_events ON gam_all_events.pvid = page_view_events.page_pvid
+      -- AND gam_all_events.event_date = page_view_events.event_date
+  )
+SELECT
+  *
+FROM
+  final

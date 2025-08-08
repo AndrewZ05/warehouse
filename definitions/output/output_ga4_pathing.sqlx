@@ -1,0 +1,77 @@
+-- TABLE: GA4 Production Pathing
+-- DESCRIPTION: Prepares page_view and screen_view data for pathing analysis
+-- UNIQUE KEY: event_id
+
+config {
+  type: "incremental",
+  schema: 'df_warehouse_output',
+  columns: {
+    event_id: "A unique identifier for the event.",
+    full_session_id: "A unique identifier for the session (combines user_pseudo_id and ga_session_id).",
+    user_pseudo_id: "Identifies the user's device as written to a first-party cookie.",
+    primary_user_id: "Identifies the user's with the user_id if available, and defaults to the device id as written to a first-party cookie.",
+    event_timestamp: "The timestamp of the event.",
+    page_location: "The URL of the page/screen where the event was fired.",
+    page_title: "The title of the page/screen where the event was fired.",
+    prior_page_location: "The URL of the page/screen the user viewed prior to loading the current page/screen.",
+    prior_page_title: "The title of the page/screen the user viewed prior to loading the current page/screen.",
+    next_page_location: "The URL of the page/screen the user viewed after the current page/screen.",
+    next_page_title: "The title of the page/screen the user viewed after the current page/screen.",
+    session_view_number: "Increments the page_view or screen_view events that occurred during the session."
+  },
+  assertions: {
+    uniqueKey: ["event_id"]
+  },
+  bigquery: {
+    partitionBy: "event_date",
+    clusterBy: ["event_timestamp"]
+  }
+}
+
+pre_operations {
+
+  DECLARE event_date_checkpoint DEFAULT (
+    SELECT date("2020-01-01")
+  );
+
+  SET event_date_checkpoint = (
+    ${when(incremental(),
+      `SELECT
+        LEAST(
+          (SELECT date_sub(current_date(), INTERVAL ${dataform.projectConfig.vars.ga4_days_back} DAY)),
+          (SELECT max(event_date) from ${self()})
+        )`,
+      `SELECT date("${dataform.projectConfig.vars.ga4_start_date}")`
+    )}
+  );
+
+  ${when(incremental(),
+    `DELETE ${self()} WHERE event_date > event_date_checkpoint`
+  )}  
+}
+
+WITH event_properties AS (
+  SELECT
+    event_id,
+    full_session_id,
+    primary_user_id,
+    event_timestamp,
+    event_date,
+    page_location,
+    page_title,
+    ROW_NUMBER() OVER (PARTITION BY full_session_id ORDER BY event_timestamp ASC) AS session_view_number
+  FROM ${ref("int_ga4_events")}
+  WHERE event_name IN ('page_view','screen_view')
+  and event_date > event_date_checkpoint
+)
+
+SELECT *,
+  LAG(page_location) 
+    OVER( PARTITION BY full_session_id ORDER BY session_view_number ASC) AS prior_page_location,
+  LAG(page_title) 
+    OVER( PARTITION BY full_session_id ORDER BY session_view_number ASC) AS prior_page_title,
+  LEAD(page_location) 
+    OVER( PARTITION BY full_session_id ORDER BY session_view_number ASC) AS next_page_location,
+  LEAD(page_title) 
+    OVER( PARTITION BY full_session_id ORDER BY session_view_number ASC) AS next_page_title,
+FROM event_properties

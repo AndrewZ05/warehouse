@@ -1,0 +1,6 @@
+config {
+    type: "declaration",
+    schema: "BN_GoogleAdManager",
+    name: "NetworkClicks_sample",
+    description: "TODO"
+}

@@ -1,0 +1,194 @@
+--| TABLE: GA4 Staging Events Table
+--| DESCRIPTION: Flattens the event data into a single table
+
+config {
+  type: "table",
+  schema: 'df_warehouse_staging',
+  tags: ["daily"],
+  bigquery: {
+    partitionBy: "event_date",
+    clusterBy: ["event_timestamp"]
+  }
+}
+
+pre_operations {
+
+  DECLARE event_date_checkpoint DEFAULT (
+    SELECT date("2020-01-01")
+  );
+
+  SET event_date_checkpoint = (
+    ${when(incremental(),
+      `SELECT
+        LEAST(
+          (SELECT date_sub(current_date(), INTERVAL ${dataform.projectConfig.vars.ga4_days_back} DAY)),
+          (SELECT max(event_date) from ${self()})
+        )`,
+      `SELECT date("${dataform.projectConfig.vars.ga4_start_date}")`
+    )}
+  );
+
+  ${when(incremental(),
+    `DELETE ${self()} WHERE event_date > event_date_checkpoint`
+  )}  
+}
+
+WITH unnested_events AS (
+  SELECT
+    user_pseudo_id,
+    stream_id,
+    event_name,
+    event_bundle_sequence_id,
+    TIMESTAMP_MICROS(event_timestamp) AS event_timestamp,
+    DATE(TIMESTAMP_MICROS(event_timestamp), "${dataform.projectConfig.vars.timezone}") AS event_date,
+    event_server_timestamp_offset,
+    user_id,
+    privacy_info.analytics_storage,
+    privacy_info.ads_storage,
+    privacy_info.uses_transient_token,
+    TIMESTAMP_MICROS(user_first_touch_timestamp) AS user_first_touch_timestamp,
+    user_ltv.revenue AS ltv_revenue,
+    user_ltv.currency AS ltv_currency,
+    device.category AS device_category,
+    device.mobile_brand_name,
+    device.mobile_model_name,
+    device.mobile_marketing_name,
+    device.mobile_os_hardware_model,
+    device.operating_system,
+    device.operating_system_version,
+    device.vendor_id,
+    device.advertising_id,
+    device.language AS device_language,
+    device.is_limited_ad_tracking,
+    device.web_info.browser,
+    device.web_info.browser_version,
+    device.web_info.hostname,
+    geo.city,
+    geo.metro,
+    geo.region,
+    geo.country,
+    geo.sub_continent,
+    geo.continent,
+    app_info.id AS app_id,
+    app_info.version AS app_version,
+    app_info.install_store,
+    app_info.firebase_app_id,
+    app_info.install_source,
+    LOWER(traffic_source.name) AS first_user_campaign,
+    LOWER(traffic_source.medium) AS first_user_medium,
+    LOWER(traffic_source.source) AS first_user_source,
+    platform,
+    ecommerce.total_item_quantity,
+    ecommerce.purchase_revenue_in_usd,
+    ecommerce.purchase_revenue,
+    ecommerce.refund_value_in_usd,
+    ecommerce.refund_value,
+    ecommerce.shipping_value_in_usd,
+    ecommerce.shipping_value,
+    ecommerce.tax_value_in_usd,
+    ecommerce.tax_value,
+    ecommerce.unique_items,
+    ecommerce.transaction_id AS ecommerce_transaction_id,
+    LOWER(collected_traffic_source.manual_campaign_id) AS event_manual_campaign_id,
+    LOWER(collected_traffic_source.manual_campaign_name) AS event_manual_campaign_name,
+    LOWER(collected_traffic_source.manual_source) AS event_manual_source,
+    LOWER(collected_traffic_source.manual_medium) AS event_manual_medium,
+    LOWER(collected_traffic_source.manual_term) AS event_manual_term,
+    LOWER(collected_traffic_source.manual_content) AS event_manual_content,
+    collected_traffic_source.gclid AS event_gclid,
+    collected_traffic_source.dclid AS event_dclid,
+    collected_traffic_source.srsltid AS event_srsltid,
+    is_active_user,
+    user_properties,
+    items,
+    PARSE_DATE('%Y%m%d', REGEXP_EXTRACT(_TABLE_SUFFIX, '[0-9]+')) AS partition_date,
+
+    --Page/Session Parameters
+    ${get_ga4_var.eventParam('ga_session_id','int')},
+    ${get_ga4_var.eventParam('ga_session_number','int')},
+    ${get_ga4_var.eventParam('page_location','string')},
+    ${get_ga4_var.eventParam('page_title','string')},
+    ${get_ga4_var.eventParam('page_referrer','string')},
+    ${get_ga4_var.eventParam('engagement_time_msec','int')},
+    ${get_ga4_var.eventParam('session_engaged','string')},
+    ${get_ga4_var.eventParam('percent_scrolled','int')},
+
+    --Click/Download Parameters
+    ${get_ga4_var.eventParam('link_classes','string')},
+    ${get_ga4_var.eventParam('link_domain','string')},
+    ${get_ga4_var.eventParam('link_id','string')},
+    ${get_ga4_var.eventParam('link_url','string')},
+    ${get_ga4_var.eventParam('outbound','string')},
+    ${get_ga4_var.eventParam('file_extension','string')},
+    ${get_ga4_var.eventParam('file_name','string')},
+    ${get_ga4_var.eventParam('link_text','string')},
+
+    --Form Parameters
+    ${get_ga4_var.eventParam('form_id','string')},
+    ${get_ga4_var.eventParam('form_name','string')},
+    ${get_ga4_var.eventParam('form_destination','string')},
+    ${get_ga4_var.eventParam('form_submit_text','string')},
+
+    --Video Parameters
+    ${get_ga4_var.eventParam('video_title','string')},
+    ${get_ga4_var.eventParam('video_current_time','int')},
+    ${get_ga4_var.eventParam('video_duration','int')},
+    ${get_ga4_var.eventParam('video_percent','int')},
+    ${get_ga4_var.eventParam('video_provider','string')},
+    ${get_ga4_var.eventParam('video_url','string')},
+    ${get_ga4_var.eventParam('visible','string')},
+
+    --Ecommerce Parameters
+    --Includes transaction-scope dimensions. Item-scoped dimensions will be available in the "ga4_prod_ecom" table
+    (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'currency') AS transaction_currency,
+    (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'transaction_id') AS transaction_id,
+    (SELECT value.double_value FROM UNNEST(event_params) WHERE key = 'value') AS transaction_value,
+    (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'coupon') AS transaction_coupon,
+    (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'payment_type') AS transaction_payment_type,
+    (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'shipping_tier') AS transaction_shipping_tier,
+    (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'virtual_currenty_name') AS transaction_virtual_currenty_name,
+    (SELECT value.double_value FROM UNNEST(event_params) WHERE key = 'shipping') AS transaction_shipping,
+    (SELECT value.double_value FROM UNNEST(event_params) WHERE key = 'tax') AS transaction_tax,
+    (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'item_list_id') AS transaction_item_list_id,
+    (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'item_list_name') AS transaction_item_list_name,
+
+
+    --Promotion Parameters
+    (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'creative_name') AS transaction_creative_name,
+    (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'creative_slot') AS transaction_creative_slot,
+    (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'promotion_id') AS transaction_promotion_id,
+    (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'promotion_name') AS transaction_promotion_name,
+
+    --Gaming Parameters
+    ${get_ga4_var.eventParam('level_name','string')},
+    ${get_ga4_var.eventParam('success','string')},
+    ${get_ga4_var.eventParam('level','int')},
+    ${get_ga4_var.eventParam('character','string')},
+    ${get_ga4_var.eventParam('score','int')},
+    ${get_ga4_var.eventParam('achievement_id','string')},
+
+    --Other Parameters
+    ${get_ga4_var.eventParam('group_id','string')},
+    ${get_ga4_var.eventParam('method','string')},
+    ${get_ga4_var.eventParam('search_term','string')},
+    ${get_ga4_var.eventParam('content_type','string')},
+    ${get_ga4_var.eventParam('content_id','string')},
+
+    --Custom parameters
+    ${project_variables.custom_event_params && project_variables.custom_event_params.length > 0 ? project_variables.custom_event_params
+        .map(
+          (item) =>
+            get_ga4_var.eventParam(item.param, item.type, item.column_name)
+        )
+        .join(", ") : ""}
+    
+
+    FROM ${ref("events_*")}
+
+    WHERE _TABLE_SUFFIX > FORMAT_DATE('%Y%m%d', event_date_checkpoint)
+)
+
+--Ensure ga_session_id is not null
+SELECT * EXCEPT(ga_session_id),
+  IFNULL(ga_session_id,0) AS ga_session_id
+FROM unnested_events

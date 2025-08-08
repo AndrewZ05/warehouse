@@ -1,0 +1,54 @@
+--| TABLE: GA4 Staging Events Table
+--| DESCRIPTION: Flattens the event data into a single table
+
+config {
+  type: "table",
+  schema: 'df_warehouse_staging',
+  tags: ["daily"],
+  bigquery: {
+    partitionBy: "occurrence_date"
+  }
+}
+
+-- pre_operations {
+
+--   DECLARE event_date_checkpoint DEFAULT (
+--     SELECT date("2020-01-01")
+--   );
+
+--   SET event_date_checkpoint = (
+--     ${when(incremental(),
+--       `SELECT
+--         LEAST(
+--           (SELECT date_sub(current_date(), INTERVAL ${dataform.projectConfig.vars.ga4_days_back} DAY)),
+--           (SELECT max(event_date) from ${self()})
+--         )`,
+--       `SELECT date("${dataform.projectConfig.vars.ga4_start_date}")`
+--     )}
+--   );
+
+--   ${when(incremental(),
+--     `DELETE ${self()} WHERE event_date > event_date_checkpoint`
+--   )}  
+-- }
+
+WITH unnested_user_audiences AS (
+  SELECT
+    pseudo_user_id,
+    stream_id,
+    PARSE_DATE('%Y%m%d', occurrence_date) as occurrence_date,
+    PARSE_DATE('%Y%m%d', last_updated_date) as last_updated_date,
+    audiences.id AS audiences_id,
+    audiences.name AS audiences_name,
+    audiences.membership_start_timestamp_micros AS audiences_membership_start_timestamp_micros,
+    audiences.membership_expiry_timestamp_micros AS audiences_membership_expiry_timestamp_micros,
+    audiences.npa AS audiences_npa
+
+    FROM ${ref("pseudonymous_users_*")} as users,
+      UNNEST(users.audiences) as audiences
+
+    -- WHERE _TABLE_SUFFIX > FORMAT_DATE('%Y%m%d', event_date_checkpoint)
+)
+
+SELECT *
+FROM unnested_user_audiences

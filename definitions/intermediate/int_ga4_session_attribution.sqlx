@@ -1,0 +1,123 @@
+--| TABLE: GA4 Intermediate Session Attribution
+--| DESCRIPTION: Calculates the various traffic sources attributed to each session
+--| UNIQUE KEY: full_session_id
+--| TODO: 
+   --The default channel grouping function throws an error in the final_processing CTE
+   --Figure out where I originally found this method and give credit
+
+
+config {
+  type: "incremental",
+  schema: 'df_warehouse_intermediate',
+  assertions: {
+    uniqueKey: ["full_session_id"]
+  },
+  bigquery: {
+    partitionBy: "session_date"
+  }
+}
+
+--Pull each session generated in the full attribution range [includes 30 days longer than subsequent tables]
+--Pull manual traffic source attribution applied to each [simple last touch attribution]
+WITH base_sessions_table AS (
+  SELECT
+    full_session_id,
+    primary_user_id,
+    ARRAY_AGG(event_date IGNORE NULLS ORDER BY event_timestamp LIMIT 1)[SAFE_OFFSET(0)] AS session_date,
+    ARRAY_AGG(referring_domain IGNORE NULLS ORDER BY event_timestamp LIMIT 1)[SAFE_OFFSET(0)] AS referring_domain,
+    MIN(event_timestamp) AS session_start,
+
+    --User Attribution
+    ARRAY_AGG(first_user_campaign IGNORE NULLS ORDER BY event_timestamp LIMIT 1)[SAFE_OFFSET(0)] AS first_user_campaign,
+    ARRAY_AGG(first_user_medium IGNORE NULLS ORDER BY event_timestamp LIMIT 1)[SAFE_OFFSET(0)] AS first_user_medium,
+    ARRAY_AGG(first_user_source IGNORE NULLS ORDER BY event_timestamp LIMIT 1)[SAFE_OFFSET(0)] AS first_user_source,
+
+    --Session Attribution
+    ARRAY_AGG(event_manual_source IGNORE NULLS ORDER BY event_timestamp LIMIT 1)[SAFE_OFFSET(0)] AS session_manual_source,
+    ARRAY_AGG(event_manual_medium IGNORE NULLS ORDER BY event_timestamp LIMIT 1)[SAFE_OFFSET(0)] AS session_manual_medium,
+    ARRAY_AGG(event_manual_term IGNORE NULLS ORDER BY event_timestamp LIMIT 1)[SAFE_OFFSET(0)] AS session_manual_term,
+    ARRAY_AGG(event_manual_content IGNORE NULLS ORDER BY event_timestamp LIMIT 1)[SAFE_OFFSET(0)] AS session_manual_content,
+    ARRAY_AGG(event_manual_campaign_id IGNORE NULLS ORDER BY event_timestamp LIMIT 1)[SAFE_OFFSET(0)] AS session_manual_campaign_id,
+    ARRAY_AGG(event_manual_campaign_name IGNORE NULLS ORDER BY event_timestamp LIMIT 1)[SAFE_OFFSET(0)] AS session_manual_campaign_name,
+    ARRAY_AGG(event_gclid IGNORE NULLS ORDER BY event_timestamp LIMIT 1)[SAFE_OFFSET(0)] AS session_gclid,
+    ARRAY_AGG(event_dclid IGNORE NULLS ORDER BY event_timestamp LIMIT 1)[SAFE_OFFSET(0)] AS session_dclid,
+    ARRAY_AGG(event_srsltid IGNORE NULLS ORDER BY event_timestamp LIMIT 1)[SAFE_OFFSET(0)] AS session_srsltid,
+    ARRAY_AGG(event_wbraid IGNORE NULLS ORDER BY event_timestamp LIMIT 1)[SAFE_OFFSET(0)] AS session_wbraid,
+    ARRAY_AGG(event_gbraid IGNORE NULLS ORDER BY event_timestamp LIMIT 1)[SAFE_OFFSET(0)] AS session_gbraid,
+    ARRAY_AGG(event_fbclid IGNORE NULLS ORDER BY event_timestamp LIMIT 1)[SAFE_OFFSET(0)] AS session_fbclid
+  FROM ${ref("int_ga4_events")}
+  WHERE event_date > session_date_checkpoint
+  GROUP BY 1,2
+),
+
+--Create last click attribution dimension
+add_last_click_attribution AS (
+  SELECT *,
+    CASE 
+      
+      --Correct error in BigQuery that attributes cpc to organic search
+      WHEN (session_gclid IS NOT NULL OR session_wbraid IS NOT NULL OR session_gbraid IS NOT NULL) 
+        THEN STRUCT('google' AS session_manual_source, 'cpc' AS session_manual_medium, session_manual_campaign_name AS session_manual_campaign_name) 
+      
+      --Set unwanted referrals to direct
+      WHEN referring_domain IN ("${dataform.projectConfig.vars.unwanted_referrals.split(',')}") 
+        THEN STRUCT('(direct)' AS session_manual_source, '(none)' AS session_manual_medium, '(not set)' AS session_manual_campaign_name)
+      
+      --If the event-scoped traffic source parameters are not null, apply them
+      WHEN COALESCE(session_manual_source, session_manual_medium, session_manual_campaign_name) IS NOT NULL 
+        THEN STRUCT(session_manual_source AS session_manual_source, session_manual_medium AS session_manual_medium, session_manual_campaign_name AS session_manual_campaign_name)
+      
+      --Default everything else to direct (including "unassigned")
+      ELSE STRUCT('(direct)' AS session_manual_source, '(none)' AS session_manual_medium, '(not set)' AS session_manual_campaign_name)
+    END AS last_click_attribution
+  FROM base_sessions_table 
+),
+
+--Create last non-direct click attribution dimension to match the GA4 user interface
+add_last_non_direct AS (
+  SELECT *,
+    IF(last_click_attribution.session_manual_medium = '(not set)',
+      LAST_VALUE(IF(last_click_attribution.session_manual_medium = '(not set)', NULL, last_click_attribution) IGNORE NULLS) OVER(
+        PARTITION BY primary_user_id ORDER BY UNIX_SECONDS(session_start)
+        RANGE BETWEEN 2592000 PRECEDING AND 1 PRECEDING),last_click_attribution -- Check prior 30 days for the last non-direct session attribution
+    ) AS last_non_direct_attribution,
+  FROM add_last_click_attribution
+),
+       
+--Select final result from the last processing step
+--Generate default channel grouping
+final_processing AS (
+  SELECT *,
+    --${channel_grouping.defaultGrouping('last_non_direct_attribution.session_manual_source','last_non_direct_attribution.session_manual_medium','slast_non_direct_attribution.session_manual_campaign_name')} AS session_default_channel_grouping,
+  FROM add_last_non_direct
+)
+
+SELECT *
+FROM final_processing
+
+pre_operations {
+  DECLARE session_date_checkpoint DEFAULT (
+    SELECT
+      date("2020-01-01")
+  );
+
+  SET
+    session_date_checkpoint = (
+    ${
+      when(incremental(),
+        `SELECT
+            LEAST(
+              (SELECT date_sub(current_date(), INTERVAL ${dataform.projectConfig.vars.ga4_days_back} DAY)),
+              (SELECT max(session_date) from ${self()})
+            )`,
+        `SELECT date("${dataform.projectConfig.vars.ga4_start_date}")`
+      )
+    }
+    );
+
+  ${
+    when(incremental(),
+      `DELETE ${self()} WHERE session_date > session_date_checkpoint`
+    )
+  }
+}

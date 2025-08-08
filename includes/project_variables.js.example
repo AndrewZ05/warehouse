@@ -1,0 +1,36 @@
+/****************************************************** 
+ * MODIFY THIS SECTION TO SET UP A NEW GA4 PROPERTY
+*******************************************************/
+const custom_event_params = [
+  { param: 'post_first_category', type: 'string' },
+  { param: 'post_id', type: 'int' }
+]
+
+/******************************************************/
+
+/**
+ * Get date in format: YYYYMMDD
+ * @params {integer} prior_days
+ */
+const get_date = (prior_days) => {
+  let d = new Date();
+  d.setDate(d.getDate()-prior_days);
+  let mm = d.getMonth() + 1;
+  let dd = d.getDate();
+  return String([d.getFullYear(),(mm>9 ? '' : '0') + mm,(dd>9 ? '' : '0') + dd].join(''));
+}
+
+// Get date ranges
+//
+const prior_days = parseInt(dataform.projectConfig.vars.prior_days)
+const range_end = get_date(1);
+const range_start = get_date(1+prior_days);
+const attribution_start = get_date(31+prior_days)
+
+// Export project vars
+module.exports = { 
+    range_start,
+    range_end,
+    attribution_start,
+    custom_event_params
+};

@@ -1,0 +1,19 @@
+--| TABLE: GA4 Users Production Data Mart
+--| DESCRIPTION: Consolidates all user attributes into a single flat table for reporting
+--| UNIQUE KEY: primary_user_id
+
+config {
+  type: "table",
+  schema: 'df_warehouse_output',
+  assertions: {
+    uniqueKey: ["primary_user_id"]
+  }
+}
+
+WITH users_table AS (
+  SELECT *
+  FROM ${ref("int_ga4_users")}
+)
+
+SELECT *
+FROM users_table

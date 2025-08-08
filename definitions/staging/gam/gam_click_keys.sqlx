@@ -1,0 +1,23 @@
+config {
+  type: "table",
+  schema: "df_warehouse_staging"
+}
+
+WITH
+  Key_Value_Pairs AS (
+    SELECT
+      line_item_id,
+      creative_id,
+      SPLIT(kv, '=') [OFFSET(0)] AS key,
+      SPLIT(kv, '=') [OFFSET(1)] AS value
+    FROM
+      ${ref('gam_click_events')},
+      UNNEST (SPLIT(custom_targeting, ';')) AS kv
+  )
+SELECT
+  line_item_id,
+  creative_id,
+  key,
+  value
+FROM
+  Key_Value_Pairs

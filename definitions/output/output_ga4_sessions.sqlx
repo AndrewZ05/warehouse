@@ -1,0 +1,58 @@
+--| TABLE: GA4 Sessions Production Data Mart
+--| DESCRIPTION: Consolidates all session attributes into a single flat table for reporting
+--| UNIQUE KEY: full_session_id
+
+config {
+  type: "incremental",
+  schema: 'df_warehouse_output',
+  assertions: {
+    uniqueKey: ["full_session_id"]
+  },
+  bigquery: {
+    partitionBy: "session_date"
+  }
+}
+
+WITH sessions_table AS (
+  SELECT * EXCEPT(
+
+    --Exclude user-scoped attributes (included in users view)
+    first_user_campaign,
+    first_user_medium,
+    first_user_source
+  )
+  FROM ${ref("int_ga4_sessions")}
+  WHERE session_date > session_date_checkpoint
+)
+
+SELECT *
+FROM sessions_table
+
+pre_operations {
+  DECLARE session_date_checkpoint DEFAULT (
+    SELECT
+      date("2020-01-01")
+  );
+
+  SET
+    session_date_checkpoint = (
+    ${
+      when(incremental(),
+        `SELECT
+            LEAST(
+              (SELECT date_sub(current_date(), INTERVAL ${dataform.projectConfig.vars.ga4_days_back} DAY)),
+              (SELECT max(session_date) from ${self()})
+            )`,
+        `SELECT date("${dataform.projectConfig.vars.ga4_start_date}")`
+      )
+    }
+    );
+
+  ${
+    when(incremental(),
+      `DELETE ${self()} WHERE session_date > session_date_checkpoint`
+    )
+  }
+}
+
+

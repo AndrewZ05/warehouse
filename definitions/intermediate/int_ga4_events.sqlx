@@ -1,0 +1,149 @@
+config {
+  type: "incremental",
+  schema: 'df_warehouse_intermediate',
+  assertions: {
+    uniqueKey: ["event_id"]
+  },
+  tags: ["daily"],
+  bigquery: {
+    partitionBy: "event_date",
+    clusterBy: ["event_timestamp"]
+  }
+}
+
+--| TABLE: GA4 Intermediate Events
+--| DESCRIPTION: Modifies the Staging GA4 data so that each event is represented in a single row
+--| UNIQUE KEY: Event_id
+--Exclude user_properties (will be processed by ga4_int_users)
+--Exclude Device & Geo info (will be processed by ga4_int_sessions)
+--Exclude items (will be processed by ga4_int_items)
+WITH
+  all_events AS (
+    SELECT
+      *
+    FROM
+      ${ref("stg_ga4_events")}
+    WHERE
+      event_date > event_date_checkpoint
+    UNION ALL
+    SELECT
+      *
+    FROM
+      ${ref("int_gam_events")}
+    WHERE
+      event_date > event_date_checkpoint
+  ),
+  add_columns AS (
+    SELECT
+      * EXCEPT (engagement_time_msec, user_properties),
+      --Create unique keys
+      TO_HEX(
+        MD5(CONCAT(stream_id, user_pseudo_id, ga_session_id, event_date))
+      ) AS full_session_id,
+      TO_HEX(
+        MD5(
+          CONCAT(
+            user_pseudo_id,
+            ga_session_id,
+            event_name,
+            event_timestamp,
+            event_bundle_sequence_id
+          )
+        )
+      ) AS event_id,
+      --Replace null engagement time with 0
+      IFNULL(engagement_time_msec, 0) AS engagement_time_msec,
+      --Extract URL parameters
+      REGEXP_EXTRACT(page_location, r'[?&]wbraid=([^&]+)') AS event_wbraid,
+      REGEXP_EXTRACT(page_location, r'[?&]gbraid=([^&]+)') AS event_gbraid,
+      REGEXP_EXTRACT(page_location, r'[?&]fbclid=([^&]+)') AS event_fbclid,
+      --Get referring domain
+      CASE
+        WHEN event_manual_medium = "referral" THEN NET.REG_DOMAIN(event_manual_source)
+      END AS referring_domain,
+      (${is_event_conversion.isEventConversion()}) AS conversions
+    FROM
+      all_events t1
+      JOIN ${ref("int_ga4_identity_graph")} t2 ON t1.user_pseudo_id = t2.ig_user_pseudo_id
+  ),
+
+  --Identify instances where the same event name was captured multiple times and then recorded in a single hit with the same timestamp
+  --Add a field to create unique event identifiers for each
+  add_row_num AS (
+    SELECT
+      * EXCEPT (ig_user_pseudo_id, conversions),
+      (conversions IS NULL) AS is_conversion,
+      conversions.event_value_in_usd,
+      conversions.goal,
+      ROW_NUMBER() OVER (
+        PARTITION BY
+          event_id
+        ORDER BY
+          event_timestamp ASC
+      ) AS event_number
+    FROM
+      add_columns
+  ),
+  latest_audience AS (
+    SELECT
+      pseudo_user_id,
+      audiences
+    FROM
+      ${ref("int_user_audiences_latest")}
+  ),
+  add_audience AS (
+    SELECT
+      a.*,
+      latest_audience.*
+    FROM
+      add_row_num a
+      LEFT JOIN latest_audience ON a.user_pseudo_id = latest_audience.pseudo_user_id
+  )
+
+
+  --Modify the event_id to include the event_num
+  --Number the events as they occurred sequentially
+SELECT
+  * EXCEPT (event_id, pseudo_user_id),
+  CONCAT(event_id, "_", event_number) AS event_id,
+  ROW_NUMBER() OVER (
+    PARTITION BY
+      full_session_id
+    ORDER BY
+      event_timestamp ASC
+  ) AS session_event_number,
+  ROW_NUMBER() OVER (
+    PARTITION BY
+      primary_user_id
+    ORDER BY
+      event_timestamp ASC
+  ) AS user_event_number
+FROM
+  add_audience
+
+pre_operations {
+  DECLARE event_date_checkpoint DEFAULT (
+    SELECT
+      date("2020-01-01")
+  );
+
+  SET
+    event_date_checkpoint = (
+    ${
+      when(incremental(),
+        `SELECT
+            LEAST(
+              (SELECT date_sub(current_date(), INTERVAL ${dataform.projectConfig.vars.ga4_days_back} DAY)),
+              (SELECT max(event_date) from ${self()})
+            )`,
+        `SELECT date("${dataform.projectConfig.vars.ga4_start_date}")`
+      )
+    }
+    );
+
+  ${
+    when(incremental(),
+      `DELETE ${self()} WHERE event_date > event_date_checkpoint`
+    )
+  }
+}
